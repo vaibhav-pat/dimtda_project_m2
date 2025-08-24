@@ -1,0 +1,31 @@
+# Virtual environment
+venv/
+
+# Mac system files
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Datasets & outputs
+data/
+output/
+output_small/
+pretrain_output/
+pretrain_output_small/
+
+# Pretrained models (keep separately or use Git LFS)
+pretrained_models/
+
+# Checkpoints, large binaries
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.json
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
