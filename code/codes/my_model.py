@@ -42,9 +42,7 @@ class DIMTDAModel(PreTrainedModel):
         
         self.W_alpha = nn.Linear(1024, 1)
 
-    # ================================================================================= #
-    # === THE DEFINITIVE FIX: Add the method the Trainer looks for ==================== #
-    # ================================================================================= #
+
     def gradient_checkpointing_enable(self):
         """
         Enables gradient checkpointing for the memory-intensive sub-modules.
@@ -54,7 +52,6 @@ class DIMTDAModel(PreTrainedModel):
         self.dit_encoder.gradient_checkpointing_enable()
         self.nougat_encoder.gradient_checkpointing_enable()
         self.trans_decoder.gradient_checkpointing_enable()
-    # ================================================================================= #
 
     def forward(
         self,

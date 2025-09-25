@@ -4,7 +4,127 @@ import torch
 import jieba
 import re
 import argparse 
+import evaluate
+from evaluate import load
+import numpy as np
+from transformers import TrainerCallback
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Load the standard metrics
+accuracy = evaluate.load("accuracy")
+precision = evaluate.load("precision")
+recall = evaluate.load("recall")
+f1 = evaluate.load("f1")
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    # The model outputs logits, we need to get the predicted class index
+    predictions = np.argmax(logits, axis=-1)
+
+    # The trainer pads labels with -100, we must ignore them for metric calculation
+    # We flatten the arrays to compare token by token
+    labels_flat = labels.flatten()
+    predictions_flat = predictions.flatten()
+    
+    mask = labels_flat != -100
+    labels_flat = labels_flat[mask]
+    predictions_flat = predictions_flat[mask]
+
+    # Handle edge cases where no valid tokens exist
+    if len(labels_flat) == 0:
+        return {
+            "accuracy": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+        }
+
+    # Calculate the metrics
+    acc = accuracy.compute(predictions=predictions_flat, references=labels_flat)["accuracy"]
+    prec = precision.compute(predictions=predictions_flat, references=labels_flat, average="weighted")["precision"]
+    rec = recall.compute(predictions=predictions_flat, references=labels_flat, average="weighted")["recall"]
+    f1_score = f1.compute(predictions=predictions_flat, references=labels_flat, average="weighted")["f1"]
+
+    # Also calculate macro averages for better insight
+    prec_macro = precision.compute(predictions=predictions_flat, references=labels_flat, average="macro")["precision"]
+    rec_macro = recall.compute(predictions=predictions_flat, references=labels_flat, average="macro")["recall"]
+    f1_macro = f1.compute(predictions=predictions_flat, references=labels_flat, average="macro")["f1"]
+
+    return {
+        "accuracy": acc,
+        "precision": prec,
+        "recall": rec,
+        "f1": f1_score,
+        "precision_macro": prec_macro,
+        "recall_macro": rec_macro,
+        "f1_macro": f1_macro,
+        "valid_tokens": len(labels_flat),
+    }
+
+class MetricsCallback(TrainerCallback):
+    """Custom callback to log metrics during training"""
+    
+    def __init__(self):
+        self.best_metrics = {}
+        self.final_metrics = {}
+    
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is not None:
+            # Print metrics in a nice format
+            if 'eval_accuracy' in logs:
+                print(f"\n=== PRETRAINING EVALUATION METRICS ===")
+                print(f"Accuracy:  {logs.get('eval_accuracy', 0):.4f}")
+                print(f"Precision: {logs.get('eval_precision', 0):.4f}")
+                print(f"Recall:    {logs.get('eval_recall', 0):.4f}")
+                print(f"F1 Score:  {logs.get('eval_f1', 0):.4f}")
+                print(f"Valid Tokens: {logs.get('eval_valid_tokens', 0)}")
+                print("=" * 35)
+                
+                # Store the latest metrics as final metrics
+                self.final_metrics = {
+                    'accuracy': logs.get('eval_accuracy', 0),
+                    'precision': logs.get('eval_precision', 0),
+                    'recall': logs.get('eval_recall', 0),
+                    'f1': logs.get('eval_f1', 0),
+                    'precision_macro': logs.get('eval_precision_macro', 0),
+                    'recall_macro': logs.get('eval_recall_macro', 0),
+                    'f1_macro': logs.get('eval_f1_macro', 0),
+                    'valid_tokens': logs.get('eval_valid_tokens', 0),
+                }
+                
+                # Track best metrics based on F1 score
+                current_f1 = logs.get('eval_f1', 0)
+                if not self.best_metrics or current_f1 > self.best_metrics.get('f1', 0):
+                    self.best_metrics = self.final_metrics.copy()
+    
+    def on_train_end(self, args, state, control, **kwargs):
+        """Called when training ends - print final summary"""
+        print("\n" + "="*60)
+        print("🎯 PRETRAINING COMPLETED - FINAL METRICS SUMMARY")
+        print("="*60)
+        
+        if self.final_metrics:
+            print("\n📊 FINAL EVALUATION METRICS:")
+            print(f"   Accuracy:     {self.final_metrics['accuracy']:.4f}")
+            print(f"   Precision:    {self.final_metrics['precision']:.4f}")
+            print(f"   Recall:       {self.final_metrics['recall']:.4f}")
+            print(f"   F1 Score:     {self.final_metrics['f1']:.4f}")
+            print(f"   Valid Tokens: {self.final_metrics['valid_tokens']:,}")
+            
+            print("\n📈 MACRO AVERAGES:")
+            print(f"   Precision (Macro): {self.final_metrics['precision_macro']:.4f}")
+            print(f"   Recall (Macro):    {self.final_metrics['recall_macro']:.4f}")
+            print(f"   F1 (Macro):        {self.final_metrics['f1_macro']:.4f}")
+        
+        if self.best_metrics:
+            print("\n🏆 BEST METRICS (During Training):")
+            print(f"   Best Accuracy:     {self.best_metrics['accuracy']:.4f}")
+            print(f"   Best Precision:    {self.best_metrics['precision']:.4f}")
+            print(f"   Best Recall:       {self.best_metrics['recall']:.4f}")
+            print(f"   Best F1 Score:     {self.best_metrics['f1']:.4f}")
+        
+        print("\n✅ Training completed successfully!")
+        print("="*60)
 def train(args):
 
     MAX_LENGTH = args.max_length
@@ -77,25 +197,45 @@ def train(args):
         gradient_accumulation_steps=8, 
         dataloader_pin_memory=False,  
         logging_strategy='steps',
-        logging_steps=1,
+        logging_steps=10,  # Reduced from 1 to avoid too frequent logging
         do_train=True,
         evaluation_strategy='steps',
-        eval_steps=args.eval_steps,
+        eval_steps=50,  # More frequent evaluation for small dataset
         save_strategy='steps',
         save_steps=args.save_steps,
-        fp16=args.fp16, use_mps_device=True,
+        fp16=args.fp16, 
+        use_mps_device=True,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
         warmup_ratio=args.warmup_ratio,
-        dataloader_num_workers=args.dataloader_num_workers
+        dataloader_num_workers=0,  # Set to 0 to avoid multiprocessing issues
+        load_best_model_at_end=True,   # Load best model at end
+        metric_for_best_model="eval_f1",  # Use F1 score for best model selection
+        greater_is_better=True,        # Higher F1 is better
     )
 
+    # Create metrics callback
+    metrics_callback = MetricsCallback()
+    
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=valid_dataset,
+        compute_metrics=compute_metrics,
+        callbacks=[metrics_callback],
     )
+
+    # Print dataset info for debugging
+    print(f"\n=== DATASET INFO ===")
+    print(f"Train dataset size: {len(train_dataset)}")
+    print(f"Valid dataset size: {len(valid_dataset)}")
+    print(f"Batch size: {args.batch_size_per_gpu}")
+    print(f"Gradient accumulation steps: 8")
+    print(f"Effective batch size: {args.batch_size_per_gpu * 8}")
+    print(f"Steps per epoch: {len(train_dataset) // (args.batch_size_per_gpu * 8)}")
+    print(f"Total steps: {len(train_dataset) // (args.batch_size_per_gpu * 8) * args.num_train_epochs}")
+    print("=" * 20)
 
     print(model)
     total_params = sum(p.numel() for p in model.parameters())
@@ -114,9 +254,9 @@ if __name__ == '__main__':
     parser.add_argument("--zh_mmd_dir", type=str)
     parser.add_argument("--split_json_file_path", type=str)
     parser.add_argument("--output_dir", type=str)
-    parser.add_argument("--max_length", type=int, default=1536)
+    parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--batch_size_per_gpu", type=int, default=4)
+    parser.add_argument("--batch_size_per_gpu", type=int, default=1)
     parser.add_argument("--eval_steps", type=int, default=500)
     parser.add_argument("--save_steps", type=int, default=500)
     parser.add_argument("--fp16", type=bool, default=False)

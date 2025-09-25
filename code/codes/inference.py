@@ -9,7 +9,12 @@ from PIL import Image
 def inference(args):
     MAX_LENGTH = args.max_length
     os.makedirs(args.result_dir, exist_ok=True)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if torch.backends.mps.is_available():
+        device = 'mps'
+    elif torch.cuda.is_available():
+        device = 'cuda'
+    else:
+        device = 'cpu'
     
     from transformers import AutoTokenizer, DonutProcessor, BeitImageProcessor
     dit_processor = BeitImageProcessor.from_pretrained(args.dit_model_dir)
